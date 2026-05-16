@@ -49,6 +49,26 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--entropy-coef", type=float, default=0.01)
     p.add_argument("--hidden-dim", type=int, default=128)
     p.add_argument(
+        "--curriculum-start",
+        type=int,
+        default=2,
+        help="Initial max Manhattan distance from start to goal at episode reset. "
+        "Set equal to --curriculum-end (or to the board diameter) to disable.",
+    )
+    p.add_argument(
+        "--curriculum-end",
+        type=int,
+        default=None,
+        help="Final max Manhattan distance; defaults to the full board diameter (height + width).",
+    )
+    p.add_argument(
+        "--curriculum-fraction",
+        type=float,
+        default=0.5,
+        help="Fraction of --total-steps over which max_goal_distance grows linearly "
+        "from --curriculum-start to --curriculum-end. After that it stays at the end value.",
+    )
+    p.add_argument(
         "--mnist-checkpoint",
         type=Path,
         default=Path("checkpoints/mnist_classifier.pt"),
@@ -66,11 +86,22 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def curriculum_max_distance(step: int, total_steps: int, fraction: float, start: int, end: int) -> int:
+    """Linear ramp from ``start`` to ``end`` over the first ``fraction`` of training."""
+    ramp_steps = max(1, int(round(total_steps * fraction)))
+    if step >= ramp_steps:
+        return end
+    t = step / ramp_steps
+    return int(round(start + t * (end - start)))
+
+
 def main() -> None:
     args = parse_args()
     assert args.num_envs % args.minibatches == 0
     height = width = args.size
     max_episode_steps = args.max_episode_steps or 4 * args.size
+    diameter = height + width
+    curriculum_end = args.curriculum_end if args.curriculum_end is not None else diameter
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -92,6 +123,7 @@ def main() -> None:
         max_steps=max_episode_steps,
         mnist_images_by_class=mnist_banks,
         seed=args.seed,
+        max_goal_distance=args.curriculum_start,
     )
 
     classifier = load_classifier(args.mnist_checkpoint, device=device)
@@ -142,8 +174,19 @@ def main() -> None:
         f"num_envs={args.num_envs}  rollout_len={args.rollout_length}  "
         f"total_steps={args.total_steps}  device={device}"
     )
+    print(
+        f"Curriculum: max_goal_distance ramps {args.curriculum_start} -> {curriculum_end} "
+        f"over the first {int(args.curriculum_fraction * 100)}% of training."
+    )
 
     for rollout_idx in range(n_rollouts):
+        env.max_goal_distance = curriculum_max_distance(
+            env_steps,
+            args.total_steps,
+            args.curriculum_fraction,
+            args.curriculum_start,
+            curriculum_end,
+        )
         rollout, hidden, obs, episode_start, info = collect_rollout(
             env, classifier, policy,
             rollout_length=cfg.rollout_length,
@@ -167,6 +210,7 @@ def main() -> None:
             sps = env_steps / max(1e-6, time.time() - t0)
             print(
                 f"[{env_steps:>8d}/{args.total_steps}]  "
+                f"d_max={env.max_goal_distance:>3d}  "
                 f"ep_ret={info['ep_return_mean']:.2f}  "
                 f"ep_len={info['ep_length_mean']:.1f}  "
                 f"succ={info['ep_success_rate']:.2f}  "

@@ -156,6 +156,7 @@ class MNISTMazeVecEnv(VectorEnv):
         obstacle_color: int = 1,
         mnist_images_by_class: list[np.ndarray] | None = None,
         seed: int | None = None,
+        max_goal_distance: int | None = None,
     ) -> None:
         super().__init__()
         assert obstacle_mask.shape == (height, width)
@@ -197,6 +198,16 @@ class MNISTMazeVecEnv(VectorEnv):
 
         self._free_indices = np.flatnonzero(~self.obstacle_mask.ravel())
         assert self._free_indices.size >= 2, "need at least two free cells (agent + goal)"
+        # Coordinates of every free cell -- used to filter goal candidates by
+        # Manhattan distance when ``max_goal_distance`` is set.
+        self._free_rc = np.stack(
+            np.unravel_index(self._free_indices, (self.height, self.width)), axis=-1
+        ).astype(np.int64)
+
+        # Curriculum knob: when set, the goal sampled at every reset must be
+        # within this Manhattan distance of the matching agent start. Mutable
+        # at runtime so a training loop can ramp it up gradually.
+        self.max_goal_distance: int | None = max_goal_distance
 
         self.single_observation_space = spaces.Dict(
             {
@@ -224,18 +235,41 @@ class MNISTMazeVecEnv(VectorEnv):
     # Helpers
     # ------------------------------------------------------------------
     def _sample_positions(self, n: int) -> tuple[np.ndarray, np.ndarray]:
-        """Sample ``n`` disjoint ``(agent, goal)`` pairs on free cells."""
+        """Sample ``n`` disjoint ``(agent, goal)`` pairs on free cells.
+
+        When ``self.max_goal_distance`` is set, each goal is constrained to be
+        within that Manhattan distance from the matching agent position.
+        """
         agent_flat = self._rng.choice(self._free_indices, size=n)
-        goal_flat = self._rng.choice(self._free_indices, size=n)
-        collisions = goal_flat == agent_flat
-        while collisions.any():
-            goal_flat[collisions] = self._rng.choice(
-                self._free_indices, size=int(collisions.sum())
-            )
+        agent = np.stack(
+            np.unravel_index(agent_flat, (self.height, self.width)), axis=-1
+        ).astype(np.int64)
+
+        if self.max_goal_distance is None:
+            goal_flat = self._rng.choice(self._free_indices, size=n)
             collisions = goal_flat == agent_flat
-        agent = np.stack(np.unravel_index(agent_flat, (self.height, self.width)), axis=-1)
-        goal = np.stack(np.unravel_index(goal_flat, (self.height, self.width)), axis=-1)
-        return agent.astype(np.int64), goal.astype(np.int64)
+            while collisions.any():
+                goal_flat[collisions] = self._rng.choice(
+                    self._free_indices, size=int(collisions.sum())
+                )
+                collisions = goal_flat == agent_flat
+            goal = np.stack(
+                np.unravel_index(goal_flat, (self.height, self.width)), axis=-1
+            ).astype(np.int64)
+        else:
+            max_d = int(self.max_goal_distance)
+            goal = np.empty_like(agent)
+            for i in range(n):
+                d = np.abs(self._free_rc - agent[i]).sum(-1)
+                mask = (d > 0) & (d <= max_d)
+                # Fall back to any other free cell if the radius is too small
+                # to contain another free cell (rare; happens for tiny ``max_d``
+                # combined with isolated agent positions).
+                if not mask.any():
+                    mask = d > 0
+                idx = self._rng.integers(0, int(mask.sum()))
+                goal[i] = self._free_rc[mask][idx]
+        return agent, goal
 
     def _sample_mnist(self, color_indices: np.ndarray) -> np.ndarray:
         """Sample one MNIST image per element in ``color_indices`` (vectorised)."""
