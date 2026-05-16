@@ -55,6 +55,32 @@ def load_classifier(
     return model
 
 
+@torch.no_grad()
+def _accuracy(
+    model: "MNISTClassifier",
+    images: np.ndarray,
+    labels: np.ndarray,
+    *,
+    device: torch.device,
+    batch_size: int = 1024,
+) -> float:
+    """Mean classification accuracy over the given ``(images, labels)`` arrays."""
+    model.eval()
+    n = images.shape[0]
+    correct = 0
+    for start in range(0, n, batch_size):
+        x = (
+            torch.from_numpy(images[start : start + batch_size])
+            .to(device)
+            .float()
+            .div_(255.0)
+            .unsqueeze(1)
+        )
+        y = torch.from_numpy(labels[start : start + batch_size]).to(device).long()
+        correct += int((model(x).argmax(-1) == y).sum().item())
+    return correct / n
+
+
 def train_classifier(
     images: np.ndarray,
     labels: np.ndarray,
@@ -63,11 +89,19 @@ def train_classifier(
     batch_size: int = 128,
     lr: float = 1e-3,
     val_fraction: float = 0.1,
+    test_data: tuple[np.ndarray, np.ndarray] | None = None,
     device: torch.device | str = "cpu",
     seed: int = 0,
     log_every: int = 100,
-) -> tuple[MNISTClassifier, float]:
-    """Train an :class:`MNISTClassifier` and return ``(model, val_accuracy)``."""
+) -> tuple[MNISTClassifier, dict[str, float]]:
+    """Train an :class:`MNISTClassifier`.
+
+    Returns ``(model, metrics)`` where ``metrics`` contains:
+
+    * ``"val_accuracy"`` — accuracy on a held-out slice of ``(images, labels)``;
+    * ``"test_accuracy"`` — accuracy on ``test_data`` if it was provided, else
+      missing.
+    """
     assert images.ndim == 3 and images.shape[1:] == (28, 28)
     assert labels.shape == (images.shape[0],)
 
@@ -80,14 +114,13 @@ def train_classifier(
     device = torch.device(device)
     x_train = torch.from_numpy(images[train_idx]).to(device).float().div_(255.0).unsqueeze(1)
     y_train = torch.from_numpy(labels[train_idx]).to(device).long()
-    x_val = torch.from_numpy(images[val_idx]).to(device).float().div_(255.0).unsqueeze(1)
-    y_val = torch.from_numpy(labels[val_idx]).to(device).long()
 
     model = MNISTClassifier().to(device)
     optim = torch.optim.Adam(model.parameters(), lr=lr)
     n_train = x_train.shape[0]
     step = 0
     for epoch in range(epochs):
+        model.train()
         order = torch.randperm(n_train, device=device)
         for start in range(0, n_train, batch_size):
             batch = order[start : start + batch_size]
@@ -101,8 +134,13 @@ def train_classifier(
                 print(f"epoch {epoch} step {step:>5d}  loss {loss.item():.4f}  train_acc {acc:.3f}")
             step += 1
 
-    model.eval()
-    with torch.no_grad():
-        val_acc = (model(x_val).argmax(-1) == y_val).float().mean().item()
-    print(f"validation accuracy: {val_acc:.4f}")
-    return model, val_acc
+    val_acc = _accuracy(model, images[val_idx], labels[val_idx], device=device)
+    print(f"held-out val accuracy ({val_idx.size} samples): {val_acc:.4f}")
+    metrics: dict[str, float] = {"val_accuracy": val_acc}
+
+    if test_data is not None:
+        test_images, test_labels = test_data
+        test_acc = _accuracy(model, test_images, test_labels, device=device)
+        print(f"official test accuracy ({test_images.shape[0]} samples): {test_acc:.4f}")
+        metrics["test_accuracy"] = test_acc
+    return model, metrics

@@ -13,11 +13,10 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-import numpy as np
 import torch
 
 from agent.mnist_classifier import train_classifier
-from env.mnist_data import load_mnist_by_class
+from env.mnist_data import load_mnist
 
 
 def parse_args() -> argparse.Namespace:
@@ -40,23 +39,27 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    banks = load_mnist_by_class(cache_dir=args.mnist_cache)
-    images = np.concatenate(banks, axis=0)
-    labels = np.concatenate([np.full(b.shape[0], c, dtype=np.int64) for c, b in enumerate(banks)])
+    train_images, train_labels = load_mnist(cache_dir=args.mnist_cache, split="train")
+    test_images, test_labels = load_mnist(cache_dir=args.mnist_cache, split="test")
+    print(f"loaded MNIST: {train_images.shape[0]} train, {test_images.shape[0]} test")
 
-    model, val_acc = train_classifier(
-        images,
-        labels,
+    model, metrics = train_classifier(
+        train_images,
+        train_labels,
         epochs=args.epochs,
         batch_size=args.batch_size,
         lr=args.lr,
+        test_data=(test_images, test_labels),
         device=args.device,
         seed=args.seed,
     )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     torch.save(model.state_dict(), args.output)
-    print(f"Saved classifier (val acc {val_acc:.4f}) to {args.output}")
+    print(
+        f"Saved classifier to {args.output}  "
+        f"(val={metrics['val_accuracy']:.4f}, test={metrics['test_accuracy']:.4f})"
+    )
 
 
 if __name__ == "__main__":

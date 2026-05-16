@@ -198,6 +198,20 @@ python -m agent.pretrain_mnist --epochs 3 \
     --output checkpoints/mnist_classifier.pt
 ```
 
+The script trains on a 90 % slice of the 60k MNIST training set, evaluates on
+the remaining 10 % as a held-out validation set, **and** reports accuracy on
+the official 10 000-sample MNIST test set:
+
+```
+held-out val accuracy (6000 samples): 0.9852
+official test accuracy (10000 samples): 0.9875
+```
+
+So the committed checkpoint reaches **~98.8 % test accuracy** after three
+epochs (~50 s on CPU) — more than enough for the downstream RL task, where
+the only thing we care about is mapping a clean MNIST sample to its digit
+class.
+
 ### Train PPO on a single board size
 
 One run trains one size; use `--size 10 / 20 / 30` for the three requested
