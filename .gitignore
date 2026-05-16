@@ -1,0 +1,13 @@
+__pycache__/
+.venv/
+venv/
+
+# Tool caches
+.pytest_cache/
+.DS_Store
+.mnist_cache/
+
+# Ad-hoc rollouts and renders, except the ones committed under docs/
+*.gif
+!docs/*.gif
+!docs/*.png
