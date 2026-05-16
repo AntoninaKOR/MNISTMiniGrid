@@ -152,5 +152,132 @@ for _ in range(1000):
   (cumulative reward of the current episode, tracked in
   `env.episode_return[env_idx]`).
 
-![sample frame](docs/sample_frame.png)
+## Training a PPO agent
+
+The `agent/` package contains the training pipeline: a pre-trained MNIST
+classifier (used as a frozen observation encoder), a recurrent (GRU)
+actor-critic policy, PPO + GAE.
+
+### Architecture
+
+* **Observation encoder** — a small CNN (`agent.mnist_classifier.MNISTClassifier`)
+  is pre-trained on MNIST and **frozen**. At every step the agent's raw
+  `28 × 28` MNIST observation is converted to a single predicted digit
+  (`argmax` of the classifier logits). The policy therefore sees the *digit
+  class* (0–9), not the pixels.
+* **Policy** — `agent.policy.GRUPolicy`: embed the digit (`Embedding(10, 32)`),
+  project the two-hot goal (`Linear(h + w, 32)`), concatenate, feed into a
+  `GRUCell(64, hidden=128)`, then two linear heads. Hidden state is reset at every episode boundary.
+* **Algorithm** — `agent.ppo`: recurrent PPO with GAE
+  (γ=0.99, λ=0.95, ε=0.2), advantages normalised globally per rollout,
+  minibatches over *envs* so the time axis stays intact for the GRU.
+
+### Why this design
+
+* **Frozen MNIST classifier as the observation encoder.** The cell observation
+  is intentionally a noisy view of a single discrete signal — the cell's
+  *color index*, which is also the MNIST digit class. This decouples representation learning from RL credit
+  assignment, makes the policy small and fast, and avoids the well-known
+  sample-inefficiency of pixel-based RL on a sparse-reward task.
+
+* **Recurrent (GRU) policy.** The env is strongly partially observable —
+  one cell per step, no compass, no map. The agent has to **integrate over
+  time** the digits it has seen, the wall/obstacle bumps, and the actions it
+  took in order to localise itself relative to the (known) goal coordinates.
+  A GRU is the smallest standard recurrent block that handles this.
+* **PPO + GAE.** PPO is the standard robust on-policy choice and works well
+  with recurrent networks. The clipped surrogate objective keeps updates
+  stable without explicit trust-region machinery, and GAE turns the very
+  sparse reward (one ±1 spike per episode) into a smoothly bootstrapped
+  advantage signal that PPO can actually learn from.
+
+### Pre-train the MNIST classifier (once)
+
+```bash
+python -m agent.pretrain_mnist --epochs 3 \
+    --output checkpoints/mnist_classifier.pt
+```
+
+### Train PPO on a single board size
+
+One run trains one size; use `--size 10 / 20 / 30` for the three requested
+scales.
+
+```bash
+python -m agent.train --size 10 --total-steps 1_000_000
+python -m agent.train --size 20 --total-steps 2_000_000
+python -m agent.train --size 30 --total-steps 4_000_000
+```
+
+The obstacle mask and color map are sampled once at startup from `--seed`
+and stay fixed for the entire run. Each run produces two artefacts in
+`checkpoints/`:
+
+* `policy_<H>x<W>.pt` — policy weights + the layout + CLI arguments;
+* `policy_<H>x<W>_metrics.csv` — per-rollout training metrics, consumed by
+  `agent.eval` to plot learning curves.
+
+Key flags (see `--help` for the rest):
+
+| flag | default | meaning |
+|------|---------|---------|
+| `--size` | `10` | side length of the square maze |
+| `--num-envs` | `16` | parallel sub-environments (must divide `--minibatches`) |
+| `--rollout-length` | `128` | env steps per PPO rollout |
+| `--total-steps` | `200_000` | total environment steps |
+| `--max-episode-steps` | `4 * size` | episode length limit |
+| `--lr` | `3e-4` | Adam learning rate |
+| `--gamma` / `--gae-lambda` | `0.99 / 0.95` | discount and GAE λ |
+| `--mnist-checkpoint` | `checkpoints/mnist_classifier.pt` | frozen encoder weights |
+| `--device` | `cpu` | use `cuda` / `mps` if available |
+
+Per-rollout metrics print as:
+
+```
+[  16384/200000]  ep_ret=0.84  ep_len=12.3  succ=0.84  n_ep= 67  pi_loss=-0.011  v_loss=0.041  H=1.105  kl=+0.005  sps=1490
+```
+
+`ep_ret` is the mean episode return for episodes that finished within the
+rollout, `succ` is the share of them that actually reached the goal, and
+`sps` is environment steps per wall-clock second.
+
+### Evaluate a trained policy: learning curves + GIF
+
+`agent.eval` takes a policy checkpoint, plots the recorded learning curves
+and records a GIF of the trained agent acting in the env:
+
+```bash
+python -m agent.eval --policy checkpoints/policy_10x10.pt
+```
+
+**Validation runs on the same environment the agent was trained on.** The
+training checkpoint stores the original `obstacle_mask` and `color_map`
+together with the relevant CLI arguments (`size`, `n_colors`,
+`max_episode_steps`, `mnist_checkpoint`, `hidden_dim`), and `agent.eval`
+rebuilds the env from those exact values. The only thing that differs from
+training is the RNG seed (`--seed`, default `12345`), so that the recorded
+episodes have fresh start/goal positions on the same fixed layout — i.e.
+this is an *in-distribution* evaluation, not a generalisation test on unseen
+mazes.
+
+By default this writes, next to the policy file:
+
+* `policy_<H>x<W>_curves.png` — 4-panel figure with mean episode return,
+  mean episode length, success rate, and policy entropy + approx KL versus
+  env steps (read straight from the metrics CSV).
+* `policy_<H>x<W>_rollout.gif` — N completed episodes of the trained
+  policy, rendered with the same MNIST-observation/legend/maze layout as the
+  random-agent GIFs above.
+
+Useful flags:
+
+| flag | default | meaning |
+|------|---------|---------|
+| `--num-episodes` | `3` | how many completed episodes to capture in the GIF |
+| `--max-frames` | `400` | hard cap on total GIF frames (safety against very long episodes) |
+| `--deterministic` | off | greedy `argmax` actions; otherwise sample from the actor distribution |
+| `--cell-size` | `28` | pixel size of one maze cell in the GIF |
+| `--fps` | `3.0` | GIF playback speed |
+| `--gif` / `--plot` / `--metrics` | derived from `--policy` | override output paths |
+| `--device` | `cpu` | use `cuda` / `mps` if available |
 

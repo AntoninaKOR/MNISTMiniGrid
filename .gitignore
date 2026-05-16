@@ -7,6 +7,10 @@ venv/
 .DS_Store
 .mnist_cache/
 
+# Ignore RL checkpoints but keep the pre-trained MNIST classifier
+checkpoints/*
+!checkpoints/mnist_classifier.pt
+
 # Ad-hoc rollouts and renders, except the ones committed under docs/
 *.gif
 !docs/*.gif
