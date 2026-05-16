@@ -37,6 +37,7 @@ class PPOConfig:
 class Rollout:
     digits: torch.Tensor          # (T, B) long
     goals: torch.Tensor           # (T, B, goal_dim) float
+    prev_actions: torch.Tensor    # (T, B) long; n_actions = "no previous action" token
     actions: torch.Tensor         # (T, B) long
     log_probs: torch.Tensor       # (T, B) float
     values: torch.Tensor          # (T, B) float
@@ -55,14 +56,22 @@ def collect_rollout(
     *,
     rollout_length: int,
     hidden: torch.Tensor,
+    prev_action: torch.Tensor,
     last_obs: dict[str, np.ndarray],
     last_episode_start: np.ndarray,
     device: torch.device,
-) -> tuple[Rollout, torch.Tensor, dict[str, np.ndarray], np.ndarray, dict[str, float]]:
+) -> tuple[
+    Rollout,
+    torch.Tensor,
+    torch.Tensor,
+    dict[str, np.ndarray],
+    np.ndarray,
+    dict[str, float],
+]:
     """Step the env ``rollout_length`` times and pack the trajectory.
 
-    Returns ``(rollout, new_hidden, last_obs, last_episode_start, info)`` so
-    the next rollout can pick up from where this one left off. ``info``
+    Returns ``(rollout, new_hidden, new_prev_action, last_obs, last_episode_start, info)``
+    so the next rollout can pick up from where this one left off. ``info``
     contains aggregate statistics over the rollout.
     """
     T = rollout_length
@@ -71,6 +80,7 @@ def collect_rollout(
 
     digits_buf = torch.empty(T, B, dtype=torch.long, device=device)
     goals_buf = torch.empty(T, B, goal_dim, dtype=torch.float32, device=device)
+    prev_actions_buf = torch.empty(T, B, dtype=torch.long, device=device)
     actions_buf = torch.empty(T, B, dtype=torch.long, device=device)
     log_probs_buf = torch.empty(T, B, dtype=torch.float32, device=device)
     values_buf = torch.empty(T, B, dtype=torch.float32, device=device)
@@ -84,6 +94,8 @@ def collect_rollout(
     completed_lengths: list[int] = []
     completed_success: list[float] = []
 
+    null_action = policy.initial_prev_action(B, device)
+
     for t in range(T):
         image_np = last_obs["image"]
         goal_np = last_obs["goal"]
@@ -91,17 +103,20 @@ def collect_rollout(
         goal_t = torch.from_numpy(goal_np).to(device)
         episode_start_t = torch.from_numpy(last_episode_start).to(device)
 
-        # Reset hidden state where the previous step ended an episode.
+        # Reset hidden state and prev_action where the previous step ended an
+        # episode -- the agent at a freshly-reset env has no "previous action".
         hidden = hidden * (~episode_start_t).float().unsqueeze(-1)
+        prev_action = torch.where(episode_start_t, null_action, prev_action)
 
         digit = classifier.predict(image_t)
-        logits, value, hidden = policy.step(digit, goal_t, hidden)
+        logits, value, hidden = policy.step(digit, goal_t, prev_action, hidden)
         dist = Categorical(logits=logits)
         action = dist.sample()
         log_prob = dist.log_prob(action)
 
         digits_buf[t] = digit
         goals_buf[t] = goal_t
+        prev_actions_buf[t] = prev_action
         actions_buf[t] = action
         log_probs_buf[t] = log_prob
         values_buf[t] = value
@@ -122,6 +137,7 @@ def collect_rollout(
             completed_lengths.append(int(env.step_count[i]))
             completed_success.append(1.0 if terminated[i] else 0.0)
 
+        prev_action = action
         last_obs = new_obs
         last_episode_start = done
 
@@ -130,12 +146,14 @@ def collect_rollout(
     goal_t = torch.from_numpy(last_obs["goal"]).to(device)
     episode_start_t = torch.from_numpy(last_episode_start).to(device)
     next_hidden = hidden * (~episode_start_t).float().unsqueeze(-1)
+    next_prev_action = torch.where(episode_start_t, null_action, prev_action)
     digit = classifier.predict(image_t)
-    _, last_value, _ = policy.step(digit, goal_t, next_hidden)
+    _, last_value, _ = policy.step(digit, goal_t, next_prev_action, next_hidden)
 
     rollout = Rollout(
         digits=digits_buf,
         goals=goals_buf,
+        prev_actions=prev_actions_buf,
         actions=actions_buf,
         log_probs=log_probs_buf,
         values=values_buf,
@@ -151,7 +169,7 @@ def collect_rollout(
         "ep_success_rate": float(np.mean(completed_success)) if completed_success else float("nan"),
         "n_episodes": len(completed_returns),
     }
-    return rollout, hidden, last_obs, last_episode_start, info
+    return rollout, hidden, prev_action, last_obs, last_episode_start, info
 
 
 def compute_gae(
@@ -216,6 +234,7 @@ def ppo_update(
             new_log_probs, new_values, new_entropies = policy.evaluate(
                 rollout.digits[:, mb_idx],
                 rollout.goals[:, mb_idx],
+                rollout.prev_actions[:, mb_idx],
                 rollout.actions[:, mb_idx],
                 rollout.episode_starts[:, mb_idx],
                 rollout.initial_hidden[mb_idx],

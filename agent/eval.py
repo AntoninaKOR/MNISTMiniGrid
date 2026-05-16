@@ -114,6 +114,8 @@ def record_gif(
 ) -> None:
     obs, _ = env.reset(seed=seed)
     hidden = policy.initial_hidden(env.num_envs, device)
+    prev_action = policy.initial_prev_action(env.num_envs, device)
+    null_action = policy.initial_prev_action(env.num_envs, device)
     episode_start = torch.ones(env.num_envs, dtype=torch.bool, device=device)
 
     frames: list[Image.Image] = [Image.fromarray(env.render_frame(env_idx=0, cell_size=cell_size))]
@@ -121,10 +123,11 @@ def record_gif(
     while finished < num_episodes and len(frames) < max_frames:
         with torch.no_grad():
             hidden = hidden * (~episode_start).float().unsqueeze(-1)
+            prev_action = torch.where(episode_start, null_action, prev_action)
             image_t = torch.from_numpy(obs["image"]).to(device)
             goal_t = torch.from_numpy(obs["goal"]).to(device)
             digit = classifier.predict(image_t)
-            logits, _, hidden = policy.step(digit, goal_t, hidden)
+            logits, _, hidden = policy.step(digit, goal_t, prev_action, hidden)
             if deterministic:
                 action = logits.argmax(-1)
             else:
@@ -132,6 +135,7 @@ def record_gif(
 
         obs, _, terminated, truncated, _ = env.step(action.cpu().numpy())
         done = np.logical_or(terminated, truncated)
+        prev_action = action
         episode_start = torch.from_numpy(done).to(device)
         if done[0]:
             finished += 1

@@ -149,6 +149,7 @@ def main() -> None:
     obs, _ = env.reset(seed=args.seed)
     episode_start = np.ones(env.num_envs, dtype=bool)
     hidden = policy.initial_hidden(env.num_envs, device)
+    prev_action = policy.initial_prev_action(env.num_envs, device)
 
     steps_per_rollout = args.rollout_length * args.num_envs
     n_rollouts = max(1, args.total_steps // steps_per_rollout)
@@ -187,10 +188,11 @@ def main() -> None:
             args.curriculum_start,
             curriculum_end,
         )
-        rollout, hidden, obs, episode_start, info = collect_rollout(
+        rollout, hidden, prev_action, obs, episode_start, info = collect_rollout(
             env, classifier, policy,
             rollout_length=cfg.rollout_length,
             hidden=hidden,
+            prev_action=prev_action,
             last_obs=obs,
             last_episode_start=episode_start,
             device=device,
