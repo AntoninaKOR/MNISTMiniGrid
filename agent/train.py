@@ -42,6 +42,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--minibatches", type=int, default=4)
     p.add_argument("--lr", type=float, default=5e-4)
     p.add_argument("--clip-eps", type=float, default=0.2)
+    p.add_argument(
+        "--value-clip-eps",
+        type=float,
+        default=0.2,
+        help="Per-epoch value-clip range. Set to a negative number to disable.",
+    )
     # γ=0.95 (horizon ≈ 20 steps) matches our short episodes (max 4 * size).
     p.add_argument("--gamma", type=float, default=0.95)
     p.add_argument("--gae-lambda", type=float, default=0.95)
@@ -144,6 +150,7 @@ def main() -> None:
         entropy_coef=args.entropy_coef,
         gamma=args.gamma,
         gae_lambda=args.gae_lambda,
+        value_clip_eps=(None if args.value_clip_eps < 0 else args.value_clip_eps),
     )
 
     obs, _ = env.reset(seed=args.seed)

@@ -31,6 +31,7 @@ class PPOConfig:
     gamma: float = 0.99
     gae_lambda: float = 0.95
     max_grad_norm: float = 0.5
+    value_clip_eps: float | None = 0.2
 
 
 @dataclass
@@ -240,6 +241,7 @@ def ppo_update(
                 rollout.initial_hidden[mb_idx],
             )
             old_log_probs = rollout.log_probs[:, mb_idx]
+            old_values = rollout.values[:, mb_idx]
             mb_adv = adv_norm[:, mb_idx]
             mb_ret = returns[:, mb_idx]
 
@@ -247,7 +249,17 @@ def ppo_update(
             surr1 = ratio * mb_adv
             surr2 = ratio.clamp(1.0 - config.clip_eps, 1.0 + config.clip_eps) * mb_adv
             policy_loss = -torch.min(surr1, surr2).mean()
-            value_loss = 0.5 * (new_values - mb_ret).pow(2).mean()
+
+            if config.value_clip_eps is None:
+                value_loss = 0.5 * (new_values - mb_ret).pow(2).mean()
+            else:
+                v_clipped = old_values + (new_values - old_values).clamp(
+                    -config.value_clip_eps, config.value_clip_eps
+                )
+                v_loss_unclipped = (new_values - mb_ret).pow(2)
+                v_loss_clipped = (v_clipped - mb_ret).pow(2)
+                value_loss = 0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
+
             entropy = new_entropies.mean()
             loss = policy_loss + config.value_coef * value_loss - config.entropy_coef * entropy
 
