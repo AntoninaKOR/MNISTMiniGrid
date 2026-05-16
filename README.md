@@ -214,13 +214,14 @@ class.
 
 ### Train PPO on a single board size
 
-One run trains one size; use `--size 10 / 20 / 30` for the three requested
-scales.
+One run trains one board size; use `--size 10 / 20 / 30` for the three
+requested scales. The defaults are tuned for 10×10 — the only thing you
+usually need to bump for larger mazes is `--total-steps`:
 
 ```bash
-python -m agent.train --size 10 --total-steps 1_000_000
-python -m agent.train --size 20 --total-steps 2_000_000
-python -m agent.train --size 30 --total-steps 4_000_000
+python -m agent.train --size 10
+python -m agent.train --size 20 --total-steps 1_000_000
+python -m agent.train --size 30 --total-steps 3_000_000
 ```
 
 The obstacle mask and color map are sampled once at startup from `--seed`
@@ -236,19 +237,29 @@ Key flags (see `--help` for the rest):
 | flag | default | meaning |
 |------|---------|---------|
 | `--size` | `10` | side length of the square maze |
-| `--num-envs` | `16` | parallel sub-environments (must divide `--minibatches`) |
+| `--total-steps` | `300_000` | total environment steps |
+| `--num-envs` | `32` | parallel sub-environments (must be divisible by `--minibatches`) |
 | `--rollout-length` | `128` | env steps per PPO rollout |
-| `--total-steps` | `200_000` | total environment steps |
+| `--epochs` | `10` | PPO update epochs per rollout |
+| `--minibatches` | `4` | minibatches per epoch (each = `num_envs / minibatches` envs) |
 | `--max-episode-steps` | `4 * size` | episode length limit |
-| `--lr` | `3e-4` | Adam learning rate |
-| `--gamma` / `--gae-lambda` | `0.99 / 0.95` | discount and GAE λ |
+| `--lr` | `5e-4` | Adam learning rate |
+| `--gamma` / `--gae-lambda` | `0.95 / 0.95` | discount and GAE λ (γ matches our ≤ `4 * size`-step episodes) |
+| `--entropy-coef` | `0.01` | entropy bonus weight |
+| `--clip-eps` | `0.2` | PPO clip range |
 | `--mnist-checkpoint` | `checkpoints/mnist_classifier.pt` | frozen encoder weights |
 | `--device` | `cpu` | use `cuda` / `mps` if available |
+| `--seed` | `0` | seed for env layout, RNG, and policy init |
+
+A healthy run should show `succ` rising from `~0.15` (random policy) to
+`>0.9` and `entropy` falling from `≈ln 4 = 1.386` down to ~0.3-0.5 over the
+budget. If `approx_kl` stays close to `0` for a long time, the updates are
+too conservative — try `--lr 1e-3` or `--epochs 20`.
 
 Per-rollout metrics print as:
 
 ```
-[  16384/200000]  ep_ret=0.84  ep_len=12.3  succ=0.84  n_ep= 67  pi_loss=-0.011  v_loss=0.041  H=1.105  kl=+0.005  sps=1490
+[   98304/300000]  ep_ret=0.64  ep_len=25.1  succ=0.64  n_ep=157  pi_loss=-0.019  v_loss=0.029  H=0.929  kl=+0.013  sps=1324
 ```
 
 `ep_ret` is the mean episode return for episodes that finished within the

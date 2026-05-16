@@ -190,6 +190,10 @@ class MNISTMazeVecEnv(VectorEnv):
             f"need MNIST images for at least {n_colors} classes, got {len(mnist_images_by_class)}"
         )
         self._images_by_class = [np.ascontiguousarray(a, dtype=np.uint8) for a in mnist_images_by_class]
+        # Cache per-class bank sizes for vectorised MNIST sampling in step().
+        self._class_sizes = np.array(
+            [bank.shape[0] for bank in self._images_by_class], dtype=np.int64
+        )
 
         self._free_indices = np.flatnonzero(~self.obstacle_mask.ravel())
         assert self._free_indices.size >= 2, "need at least two free cells (agent + goal)"
@@ -234,11 +238,16 @@ class MNISTMazeVecEnv(VectorEnv):
         return agent.astype(np.int64), goal.astype(np.int64)
 
     def _sample_mnist(self, color_indices: np.ndarray) -> np.ndarray:
-        """Sample one MNIST image per element in ``color_indices``."""
-        out = np.empty((color_indices.shape[0], 28, 28), dtype=np.uint8)
-        for i, c in enumerate(color_indices):
-            bank = self._images_by_class[int(c)]
-            out[i] = bank[self._rng.integers(0, bank.shape[0])]
+        """Sample one MNIST image per element in ``color_indices`` (vectorised)."""
+        n = color_indices.shape[0]
+        rand_u = self._rng.random(n)
+        offsets = (rand_u * self._class_sizes[color_indices]).astype(np.int64)
+        out = np.empty((n, 28, 28), dtype=np.uint8)
+        # One Python loop over the (at most 10) classes, not over every env.
+        for c in range(self.n_colors):
+            mask = color_indices == c
+            if mask.any():
+                out[mask] = self._images_by_class[c][offsets[mask]]
         return out
 
     def _build_obs(self) -> dict[str, np.ndarray]:
