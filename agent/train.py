@@ -173,16 +173,29 @@ def main() -> None:
 
     metric_keys = [
         "env_steps",
+        "d_max",
+        # Rollout / episode stats
         "ep_return_mean",
         "ep_length_mean",
         "ep_success_rate",
         "n_episodes",
+        "ep_truncated_frac",     # fraction of completed episodes that timed out (vs reached goal)
+        "term_value_mean",       # mean V(terminating_obs) for truncated steps (sb3-style bootstrap)
+        "reward_density",        # fraction of env-steps with reward > 0
+        "observed_action_entropy",  # H of empirical action distribution in rollout
+        # PPO update stats
         "policy_loss",
         "value_loss",
-        "entropy",
+        "entropy",               # mean policy entropy (per-state, from new_log_probs)
         "approx_kl",
         "clip_frac",
         "grad_norm",
+        "explained_var",         # 1 = perfect critic, 0 = constant baseline, < 0 = worse than baseline
+        "value_mean",
+        "value_std",
+        "returns_mean",
+        "returns_std",
+        "adv_std_raw",           # spread of advantages before normalisation
     ]
     metrics_log: list[dict[str, float]] = []
 
@@ -217,10 +230,12 @@ def main() -> None:
         env_steps += steps_per_rollout
         metrics_log.append({
             "env_steps": env_steps,
-            "ep_return_mean": info["ep_return_mean"],
-            "ep_length_mean": info["ep_length_mean"],
-            "ep_success_rate": info["ep_success_rate"],
-            "n_episodes": info["n_episodes"],
+            "d_max": env.max_goal_distance,
+            **{k: info[k] for k in (
+                "ep_return_mean", "ep_length_mean", "ep_success_rate", "n_episodes",
+                "ep_truncated_frac", "term_value_mean", "reward_density",
+                "observed_action_entropy",
+            )},
             **update_stats,
         })
 
@@ -229,13 +244,16 @@ def main() -> None:
             print(
                 f"[{env_steps:>8d}/{args.total_steps}]  "
                 f"d_max={env.max_goal_distance:>3d}  "
-                f"ep_ret={info['ep_return_mean']:.2f}  "
-                f"ep_len={info['ep_length_mean']:.1f}  "
                 f"succ={info['ep_success_rate']:.2f}  "
+                f"ep_len={info['ep_length_mean']:.1f}  "
                 f"n_ep={info['n_episodes']:>3d}  "
-                f"pi_loss={update_stats['policy_loss']:+.3f}  "
-                f"v_loss={update_stats['value_loss']:.3f}  "
-                f"H={update_stats['entropy']:.3f}  "
+                f"trunc={info['ep_truncated_frac']:.2f}  "
+                f"Vmean={update_stats['value_mean']:+.2f}  "
+                f"EV={update_stats['explained_var']:+.2f}  "
+                f"pi={update_stats['policy_loss']:+.3f}  "
+                f"v={update_stats['value_loss']:.3f}  "
+                f"H={update_stats['entropy']:.2f}  "
+                f"Hact={info['observed_action_entropy']:.2f}  "
                 f"kl={update_stats['approx_kl']:+.3f}  "
                 f"|g|={update_stats['grad_norm']:.2f}  "
                 f"sps={sps:.0f}"

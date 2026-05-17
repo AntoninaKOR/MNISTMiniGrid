@@ -96,6 +96,9 @@ def collect_rollout(
     completed_returns: list[float] = []
     completed_lengths: list[int] = []
     completed_success: list[float] = []
+    truncated_term_values: list[float] = []  # V(terminating_obs) for truncated steps
+    n_truncated_total = 0
+    n_terminated_total = 0
 
     null_action = policy.initial_prev_action(B, device)
 
@@ -132,6 +135,9 @@ def collect_rollout(
         rewards_buf[t] = torch.from_numpy(reward.astype(np.float32)).to(device)
         dones_buf[t] = torch.from_numpy(done).to(device)
 
+        n_terminated_total += int(terminated.sum())
+        n_truncated_total += int(truncated.sum())
+
         if truncated.any():
             trunc_mask = torch.from_numpy(truncated).to(device)
             term_image_t = torch.from_numpy(new_obs["image"]).to(device)
@@ -143,6 +149,7 @@ def collect_rollout(
             terminating_values_buf[t] = torch.where(
                 trunc_mask, term_value, torch.zeros_like(term_value)
             )
+            truncated_term_values.extend(term_value[trunc_mask].cpu().tolist())
 
         for i in np.flatnonzero(done):
             completed_returns.append(float(env.episode_return[i]))
@@ -176,11 +183,27 @@ def collect_rollout(
         initial_hidden=initial_hidden,
         last_value=last_value,
     )
+
+    action_counts = torch.bincount(actions_buf.flatten(), minlength=policy.n_actions).float()
+    action_freq = action_counts / action_counts.sum()
+    observed_action_entropy = float(
+        -(action_freq * torch.log(action_freq + 1e-8)).sum().item()
+    )
+
+    n_steps_total = T * B
     info = {
         "ep_return_mean": float(np.mean(completed_returns)) if completed_returns else float("nan"),
         "ep_length_mean": float(np.mean(completed_lengths)) if completed_lengths else float("nan"),
         "ep_success_rate": float(np.mean(completed_success)) if completed_success else float("nan"),
         "n_episodes": len(completed_returns),
+        "ep_truncated_frac": (
+            n_truncated_total / max(1, n_terminated_total + n_truncated_total)
+        ),
+        "term_value_mean": (
+            float(np.mean(truncated_term_values)) if truncated_term_values else 0.0
+        ),
+        "reward_density": float(rewards_buf.gt(0).float().mean().item()),  # fraction of steps with reward > 0
+        "observed_action_entropy": observed_action_entropy,
     }
     return rollout, hidden, prev_action, last_obs, last_episode_start, info
 
@@ -234,6 +257,19 @@ def ppo_update(
     )
     # Normalise advantages globally for stability.
     adv_norm = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+    with torch.no_grad():
+        var_returns = returns.var()
+        explained_var = (
+            float("nan")
+            if var_returns < 1e-8
+            else (1.0 - (returns - rollout.values).var() / var_returns).item()
+        )
+        value_mean = rollout.values.mean().item()
+        value_std = rollout.values.std().item()
+        returns_mean = returns.mean().item()
+        returns_std = returns.std().item()
+        adv_std_raw = advantages.std().item()  # before normalisation
 
     B = rollout.digits.shape[1]
     assert B % config.minibatches == 0, "num_envs must be divisible by minibatches"
@@ -301,4 +337,10 @@ def ppo_update(
 
     for k in stats:
         stats[k] /= max(1, n_updates)
+    stats["explained_var"] = explained_var
+    stats["value_mean"] = value_mean
+    stats["value_std"] = value_std
+    stats["returns_mean"] = returns_mean
+    stats["returns_std"] = returns_std
+    stats["adv_std_raw"] = adv_std_raw
     return stats
