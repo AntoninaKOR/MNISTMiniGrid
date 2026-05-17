@@ -31,7 +31,7 @@ class PPOConfig:
     gamma: float = 0.99
     gae_lambda: float = 0.95
     max_grad_norm: float = 0.5
-    value_clip_eps: float | None = 0.2
+    value_clip_eps: float | None = None
 
 
 @dataclass

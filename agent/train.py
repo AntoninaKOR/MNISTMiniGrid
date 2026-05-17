@@ -45,8 +45,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--value-clip-eps",
         type=float,
-        default=0.2,
-        help="Per-epoch value-clip range. Set to a negative number to disable.",
+        default=-1.0,
+        help="Per-epoch value-clip range. Disabled by default; "
     )
     # γ=0.95 (horizon ≈ 20 steps) matches our short episodes (max 4 * size).
     p.add_argument("--gamma", type=float, default=0.95)
