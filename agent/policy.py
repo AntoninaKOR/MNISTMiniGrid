@@ -35,10 +35,12 @@ class GRUPolicy(nn.Module):
         self.num_layers = num_layers
         self.n_actions = n_actions
         self.digit_embed = nn.Embedding(n_digits, n_digits)
+        n_action_tokens = n_actions + 1  # +1 for "no previous action" / start of episode
+        self.action_embed = nn.Embedding(n_action_tokens, n_action_tokens)
         self.goal_proj = nn.Linear(goal_dim, embed_dim)
-        # ``n_actions`` is the special "no previous action" / "start of episode" token.
-        self.action_embed = nn.Embedding(n_actions + 1, embed_dim)
-        self.gru = nn.GRU(n_digits + embed_dim * 2, hidden_dim, num_layers=num_layers)
+        self.gru = nn.GRU(
+            n_digits + n_action_tokens + embed_dim, hidden_dim, num_layers=num_layers
+        )
         self.actor = nn.Linear(hidden_dim, n_actions)
         self.critic = nn.Linear(hidden_dim, 1)
 
