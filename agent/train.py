@@ -55,6 +55,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--entropy-coef", type=float, default=0.01)
     p.add_argument("--hidden-dim", type=int, default=128)
     p.add_argument(
+        "--num-layers",
+        type=int,
+        default=1,
+        help="Number of stacked GRU layers. >1 helps long-horizon partial-observability "
+        "tasks at the cost of more compute.",
+    )
+    p.add_argument(
         "--curriculum-start",
         type=int,
         default=2,
@@ -138,6 +145,7 @@ def main() -> None:
         goal_dim=height + width,
         n_actions=4,
         hidden_dim=args.hidden_dim,
+        num_layers=args.num_layers,
     ).to(device)
     optimizer = torch.optim.Adam(policy.parameters(), lr=args.lr)
     cfg = PPOConfig(
@@ -174,6 +182,7 @@ def main() -> None:
         "entropy",
         "approx_kl",
         "clip_frac",
+        "grad_norm",
     ]
     metrics_log: list[dict[str, float]] = []
 
@@ -228,6 +237,7 @@ def main() -> None:
                 f"v_loss={update_stats['value_loss']:.3f}  "
                 f"H={update_stats['entropy']:.3f}  "
                 f"kl={update_stats['approx_kl']:+.3f}  "
+                f"|g|={update_stats['grad_norm']:.2f}  "
                 f"sps={sps:.0f}"
             )
 

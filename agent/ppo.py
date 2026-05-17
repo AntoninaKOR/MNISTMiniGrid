@@ -45,7 +45,7 @@ class Rollout:
     rewards: torch.Tensor         # (T, B) float
     dones: torch.Tensor           # (T, B) bool (term | trunc at step t)
     episode_starts: torch.Tensor  # (T, B) bool (first step after a reset)
-    initial_hidden: torch.Tensor  # (B, hidden)
+    initial_hidden: torch.Tensor  # (num_layers, B, hidden)
     last_value: torch.Tensor      # (B,)
 
 
@@ -106,7 +106,8 @@ def collect_rollout(
 
         # Reset hidden state and prev_action where the previous step ended an
         # episode -- the agent at a freshly-reset env has no "previous action".
-        hidden = hidden * (~episode_start_t).float().unsqueeze(-1)
+        # ``hidden`` has shape (num_layers, B, H); broadcast mask over layers.
+        hidden = hidden * (~episode_start_t).float().view(1, -1, 1)
         prev_action = torch.where(episode_start_t, null_action, prev_action)
 
         digit = classifier.predict(image_t)
@@ -146,7 +147,7 @@ def collect_rollout(
     image_t = torch.from_numpy(last_obs["image"]).to(device)
     goal_t = torch.from_numpy(last_obs["goal"]).to(device)
     episode_start_t = torch.from_numpy(last_episode_start).to(device)
-    next_hidden = hidden * (~episode_start_t).float().unsqueeze(-1)
+    next_hidden = hidden * (~episode_start_t).float().view(1, -1, 1)
     next_prev_action = torch.where(episode_start_t, null_action, prev_action)
     digit = classifier.predict(image_t)
     _, last_value, _ = policy.step(digit, goal_t, next_prev_action, next_hidden)
@@ -225,7 +226,14 @@ def ppo_update(
     B = rollout.digits.shape[1]
     assert B % config.minibatches == 0, "num_envs must be divisible by minibatches"
     mb_size = B // config.minibatches
-    stats = {"policy_loss": 0.0, "value_loss": 0.0, "entropy": 0.0, "approx_kl": 0.0, "clip_frac": 0.0}
+    stats = {
+        "policy_loss": 0.0,
+        "value_loss": 0.0,
+        "entropy": 0.0,
+        "approx_kl": 0.0,
+        "clip_frac": 0.0,
+        "grad_norm": 0.0,
+    }
     n_updates = 0
 
     for _ in range(config.epochs):
@@ -238,7 +246,7 @@ def ppo_update(
                 rollout.prev_actions[:, mb_idx],
                 rollout.actions[:, mb_idx],
                 rollout.episode_starts[:, mb_idx],
-                rollout.initial_hidden[mb_idx],
+                rollout.initial_hidden[:, mb_idx],
             )
             old_log_probs = rollout.log_probs[:, mb_idx]
             old_values = rollout.values[:, mb_idx]
@@ -265,7 +273,7 @@ def ppo_update(
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
-            nn.utils.clip_grad_norm_(policy.parameters(), config.max_grad_norm)
+            grad_norm = nn.utils.clip_grad_norm_(policy.parameters(), config.max_grad_norm)
             optimizer.step()
 
             with torch.no_grad():
@@ -276,6 +284,7 @@ def ppo_update(
             stats["entropy"] += entropy.item()
             stats["approx_kl"] += approx_kl
             stats["clip_frac"] += clip_frac
+            stats["grad_norm"] += float(grad_norm)
             n_updates += 1
 
     for k in stats:

@@ -122,7 +122,7 @@ def record_gif(
     finished = 0
     while finished < num_episodes and len(frames) < max_frames:
         with torch.no_grad():
-            hidden = hidden * (~episode_start).float().unsqueeze(-1)
+            hidden = hidden * (~episode_start).float().view(1, -1, 1)
             prev_action = torch.where(episode_start, null_action, prev_action)
             image_t = torch.from_numpy(obs["image"]).to(device)
             goal_t = torch.from_numpy(obs["goal"]).to(device)
@@ -174,6 +174,7 @@ def main() -> None:
         goal_dim=height + width,
         n_actions=4,
         hidden_dim=int(train_args["hidden_dim"]),
+        num_layers=int(train_args.get("num_layers", 1)),
     ).to(device)
     policy.load_state_dict(ckpt["policy"])
     policy.eval()
