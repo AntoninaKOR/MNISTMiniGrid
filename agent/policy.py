@@ -41,8 +41,16 @@ class GRUPolicy(nn.Module):
         self.gru = nn.GRU(
             n_digits + n_action_tokens + embed_dim, hidden_dim, num_layers=num_layers
         )
-        self.actor = nn.Linear(hidden_dim, n_actions)
-        self.critic = nn.Linear(hidden_dim, 1)
+        self.actor = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, n_actions),
+        )
+        self.critic = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, 1),
+        )
 
     def initial_hidden(self, batch_size: int, device: torch.device) -> torch.Tensor:
         """Return zero hidden state of shape ``(num_layers, batch, hidden_dim)``."""
