@@ -37,7 +37,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--num-envs", type=int, default=32)
     p.add_argument("--rollout-length", type=int, default=128)
     p.add_argument("--total-steps", type=int, default=300_000, help="Total environment steps.")
-    p.add_argument("--max-episode-steps", type=int, default=None, help="Defaults to 4 * size.")
+    p.add_argument(
+        "--max-episode-steps",
+        type=int,
+        default=None,
+        help="Defaults to 10 * size.",
+    )
     p.add_argument("--epochs", type=int, default=10)
     p.add_argument("--minibatches", type=int, default=4)
     p.add_argument("--lr", type=float, default=5e-4)
@@ -46,27 +51,51 @@ def parse_args() -> argparse.Namespace:
         "--value-clip-eps",
         type=float,
         default=-1.0,
-        help="Per-epoch value-clip range. Disabled by default; "
+        help="Per-epoch value-clip range. Disabled by default.",
     )
-    # γ=0.95 (horizon ≈ 20 steps) matches our short episodes (max 4 * size).
-    p.add_argument("--gamma", type=float, default=0.95)
+    p.add_argument(
+        "--lr-anneal",
+        action="store_true",
+        default=False,
+        help="Linearly decay lr from its initial value to 0 over training.",
+    )
+    p.add_argument(
+        "--clip-anneal",
+        action="store_true",
+        default=False,
+        help="Linearly decay clip_eps from its initial value to clip-anneal-min.",
+    )
+    p.add_argument("--clip-anneal-min", type=float, default=0.05)
+    p.add_argument(
+        "--entropy-anneal",
+        action="store_true",
+        default=False,
+        help="Linearly decay entropy_coef from its initial value to --entropy-anneal-min.",
+    )
+    p.add_argument("--entropy-anneal-min", type=float, default=0.005)
+    p.add_argument("--gamma", type=float, default=0.99)
     p.add_argument("--gae-lambda", type=float, default=0.95)
     p.add_argument("--value-coef", type=float, default=0.5)
     p.add_argument("--entropy-coef", type=float, default=0.01)
+    p.add_argument("--max-grad-norm", type=float, default=0.5)
     p.add_argument("--hidden-dim", type=int, default=128)
+    p.add_argument(
+        "--action-embed-dim",
+        type=int,
+        default=32,
+        help="Embedding size for prev_action. 0 = remove prev_action from GRU input entirely.",
+    )
     p.add_argument(
         "--num-layers",
         type=int,
         default=1,
-        help="Number of stacked GRU layers. >1 helps long-horizon partial-observability "
-        "tasks at the cost of more compute.",
+        help="Number of stacked GRU layers.",
     )
     p.add_argument(
         "--curriculum-start",
         type=int,
         default=2,
-        help="Initial max Manhattan distance from start to goal at episode reset. "
-        "Set equal to --curriculum-end (or to the board diameter) to disable.",
+        help="Initial max Manhattan distance from start to goal at episode reset.",
     )
     p.add_argument(
         "--curriculum-end",
@@ -80,6 +109,25 @@ def parse_args() -> argparse.Namespace:
         default=0.5,
         help="Fraction of --total-steps over which max_goal_distance grows linearly "
         "from --curriculum-start to --curriculum-end. After that it stays at the end value.",
+    )
+    p.add_argument(
+        "--adaptive-curriculum",
+        action="store_true",
+        default=False,
+        help="When set, advance d_max only when rolling success rate exceeds "
+        "--curriculum-threshold (ignores --curriculum-fraction).",
+    )
+    p.add_argument(
+        "--curriculum-threshold",
+        type=float,
+        default=0.7,
+        help="Success rate that triggers d_max advancement when --adaptive-curriculum is used.",
+    )
+    p.add_argument(
+        "--curriculum-window",
+        type=int,
+        default=20,
+        help="Number of recent rollouts used to estimate success rate for adaptive curriculum.",
     )
     p.add_argument(
         "--mnist-checkpoint",
@@ -112,7 +160,7 @@ def main() -> None:
     args = parse_args()
     assert args.num_envs % args.minibatches == 0
     height = width = args.size
-    max_episode_steps = args.max_episode_steps or 4 * args.size
+    max_episode_steps = args.max_episode_steps or 10 * args.size
     diameter = height + width
     curriculum_end = args.curriculum_end if args.curriculum_end is not None else diameter
 
@@ -145,6 +193,7 @@ def main() -> None:
         goal_dim=height + width,
         n_actions=4,
         hidden_dim=args.hidden_dim,
+        action_embed_dim=args.action_embed_dim,
         num_layers=args.num_layers,
     ).to(device)
     optimizer = torch.optim.Adam(policy.parameters(), lr=args.lr)
@@ -158,6 +207,7 @@ def main() -> None:
         entropy_coef=args.entropy_coef,
         gamma=args.gamma,
         gae_lambda=args.gae_lambda,
+        max_grad_norm=args.max_grad_norm,
         value_clip_eps=(None if args.value_clip_eps < 0 else args.value_clip_eps),
     )
 
@@ -171,52 +221,102 @@ def main() -> None:
     env_steps = 0
     t0 = time.time()
 
+    # Rolling window for adaptive curriculum.
+    succ_window: list[float] = []
+
     metric_keys = [
         "env_steps",
         "d_max",
+        "lr_now",
+        "clip_eps_now",
         # Rollout / episode stats
         "ep_return_mean",
         "ep_length_mean",
         "ep_success_rate",
         "n_episodes",
-        "ep_truncated_frac",     # fraction of completed episodes that timed out (vs reached goal)
-        "term_value_mean",       # mean V(terminating_obs) for truncated steps (sb3-style bootstrap)
-        "reward_density",        # fraction of env-steps with reward > 0
-        "observed_action_entropy",  # H of empirical action distribution in rollout
+        "ep_truncated_frac",
+        "term_value_mean",
+        "reward_density",
+        "observed_action_entropy",
         # PPO update stats
         "policy_loss",
         "value_loss",
-        "entropy",               # mean policy entropy (per-state, from new_log_probs)
+        "entropy",
         "approx_kl",
         "clip_frac",
         "grad_norm",
-        "explained_var",         # 1 = perfect critic, 0 = constant baseline, < 0 = worse than baseline
+        "explained_var",
         "value_mean",
         "value_std",
         "returns_mean",
         "returns_std",
-        "adv_std_raw",           # spread of advantages before normalisation
+        "adv_std_raw",
     ]
     metrics_log: list[dict[str, float]] = []
 
+    anneal_mode = args.lr_anneal or args.clip_anneal or args.entropy_anneal
     print(
         f"Starting training: size={args.size}x{args.size}  "
         f"num_envs={args.num_envs}  rollout_len={args.rollout_length}  "
-        f"total_steps={args.total_steps}  device={device}"
+        f"total_steps={args.total_steps}  max_ep_steps={max_episode_steps}  device={device}"
     )
-    print(
-        f"Curriculum: max_goal_distance ramps {args.curriculum_start} -> {curriculum_end} "
-        f"over the first {int(args.curriculum_fraction * 100)}% of training."
-    )
+    if args.adaptive_curriculum:
+        print(
+            f"Curriculum: adaptive, d_max starts at {args.curriculum_start}, "
+            f"advances when succ(window={args.curriculum_window}) > {args.curriculum_threshold}."
+        )
+    else:
+        print(
+            f"Curriculum: linear ramp {args.curriculum_start} -> {curriculum_end} "
+            f"over first {int(args.curriculum_fraction * 100)}% of training."
+        )
+    if anneal_mode:
+        print(f"Annealing: lr={'ON' if args.lr_anneal else 'OFF'}  clip={'ON' if args.clip_anneal else 'OFF'}  entropy={'ON' if args.entropy_anneal else 'OFF'}")
 
     for rollout_idx in range(n_rollouts):
-        env.max_goal_distance = curriculum_max_distance(
+        # ---- Annealing ----
+        frac_remaining = 1.0 - env_steps / max(1, args.total_steps)
+        lr_now = args.lr * frac_remaining if args.lr_anneal else args.lr
+        clip_now = (
+            max(args.clip_anneal_min, args.clip_eps * frac_remaining)
+            if args.clip_anneal
+            else args.clip_eps
+        )
+        entropy_now = (
+            max(args.entropy_anneal_min, args.entropy_coef * frac_remaining)
+            if args.entropy_anneal
+            else args.entropy_coef
+        )
+        if anneal_mode:
+            for pg in optimizer.param_groups:
+                pg["lr"] = lr_now
+            cfg.clip_eps = clip_now
+            cfg.entropy_coef = entropy_now
+
+        # ---- Curriculum ----
+        # Linear floor guarantees d_max always advances (avoids permanent stall).
+        linear_d = curriculum_max_distance(
             env_steps,
             args.total_steps,
             args.curriculum_fraction,
             args.curriculum_start,
             curriculum_end,
         )
+        if args.adaptive_curriculum:
+            # Adaptive boost: advance one extra step when rolling succ > threshold.
+            # We keep the window rolling (no clear) so context survives an advance.
+            current_d = env.max_goal_distance or args.curriculum_start
+            if (
+                len(succ_window) >= args.curriculum_window
+                and float(np.mean(succ_window)) >= args.curriculum_threshold
+                and current_d < curriculum_end
+            ):
+                current_d = min(current_d + 1, curriculum_end)
+            # Floor: never go below what the linear schedule requires.
+            env.max_goal_distance = max(current_d, linear_d)
+        else:
+            env.max_goal_distance = linear_d
+
         rollout, hidden, prev_action, obs, episode_start, info = collect_rollout(
             env, classifier, policy,
             rollout_length=cfg.rollout_length,
@@ -228,9 +328,17 @@ def main() -> None:
         )
         update_stats = ppo_update(policy, optimizer, rollout, cfg)
         env_steps += steps_per_rollout
+
+        if not np.isnan(info["ep_success_rate"]):
+            succ_window.append(info["ep_success_rate"])
+            if len(succ_window) > args.curriculum_window:
+                succ_window.pop(0)
+
         metrics_log.append({
             "env_steps": env_steps,
             "d_max": env.max_goal_distance,
+            "lr_now": lr_now,
+            "clip_eps_now": clip_now,
             **{k: info[k] for k in (
                 "ep_return_mean", "ep_length_mean", "ep_success_rate", "n_episodes",
                 "ep_truncated_frac", "term_value_mean", "reward_density",
@@ -256,6 +364,8 @@ def main() -> None:
                 f"Hact={info['observed_action_entropy']:.2f}  "
                 f"kl={update_stats['approx_kl']:+.3f}  "
                 f"|g|={update_stats['grad_norm']:.2f}  "
+                f"lr={lr_now:.2e}  "
+                f"H_coef={entropy_now:.4f}  "
                 f"sps={sps:.0f}"
             )
 

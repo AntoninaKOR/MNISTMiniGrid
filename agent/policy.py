@@ -26,6 +26,7 @@ class GRUPolicy(nn.Module):
         goal_dim: int,
         n_actions: int = 4,
         embed_dim: int = 32,
+        action_embed_dim: int = 32,
         hidden_dim: int = 128,
         num_layers: int = 1,
     ) -> None:
@@ -34,23 +35,15 @@ class GRUPolicy(nn.Module):
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
         self.n_actions = n_actions
+        self.action_embed_dim = action_embed_dim
         self.digit_embed = nn.Embedding(n_digits, n_digits)
         n_action_tokens = n_actions + 1  # +1 for "no previous action" / start of episode
-        self.action_embed = nn.Embedding(n_action_tokens, n_action_tokens)
+        self.action_embed = nn.Embedding(n_action_tokens, action_embed_dim) if action_embed_dim > 0 else None
         self.goal_proj = nn.Linear(goal_dim, embed_dim)
-        self.gru = nn.GRU(
-            n_digits + n_action_tokens + embed_dim, hidden_dim, num_layers=num_layers
-        )
-        self.actor = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Tanh(),
-            nn.Linear(hidden_dim, n_actions),
-        )
-        self.critic = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Tanh(),
-            nn.Linear(hidden_dim, 1),
-        )
+        gru_input_dim = n_digits + embed_dim + (action_embed_dim if action_embed_dim > 0 else 0)
+        self.gru = nn.GRU(gru_input_dim, hidden_dim, num_layers=num_layers)
+        self.actor = nn.Linear(hidden_dim, n_actions)
+        self.critic = nn.Linear(hidden_dim, 1)
 
     def initial_hidden(self, batch_size: int, device: torch.device) -> torch.Tensor:
         """Return zero hidden state of shape ``(num_layers, batch, hidden_dim)``."""
@@ -66,14 +59,10 @@ class GRUPolicy(nn.Module):
         goal: torch.Tensor,
         prev_action: torch.Tensor,
     ) -> torch.Tensor:
-        return torch.cat(
-            [
-                self.digit_embed(digit),
-                self.goal_proj(goal),
-                self.action_embed(prev_action),
-            ],
-            dim=-1,
-        )
+        parts = [self.digit_embed(digit), self.goal_proj(goal)]
+        if self.action_embed is not None:
+            parts.append(self.action_embed(prev_action))
+        return torch.cat(parts, dim=-1)
 
     def step(
         self,

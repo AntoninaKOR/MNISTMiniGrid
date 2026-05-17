@@ -165,19 +165,16 @@ actor-critic policy, PPO + GAE.
   `28 × 28` MNIST observation is converted to a single predicted digit
   (`argmax` of the classifier logits). The policy therefore sees the *digit
   class* (0–9), not the pixels.
-* **Policy** — `agent.policy.GRUPolicy`: embed the digit (`Embedding(10, 32)`),
-  project the two-hot goal (`Linear(h + w, 32)`), concatenate, feed into a
-  `GRUCell(64, hidden=128)`, then two linear heads. Hidden state is reset at every episode boundary.
+* **Policy** — `agent.policy.GRUPolicy`:
+  * `Embedding(10, 10)` — one-hot digit encoding
+  * `Linear(h + w, 32)` — projects the two-hot goal to a 32-d vector
+  * Concatenated (42-d), fed into `GRU(42, hidden=128, num_layers=1)`
+  * Two direct linear heads: `Linear(128, 4)` (actor), `Linear(128, 1)` (critic)
+  * Hidden state and prev-action token are reset at every episode boundary
 * **Algorithm** — `agent.ppo`: recurrent PPO with GAE
-  (γ=0.95, λ=0.95, ε=0.2), advantages normalised globally per rollout,
+  (γ=0.99, λ=0.95, ε=0.2), advantages normalised globally per rollout,
   minibatches over *envs* so the time axis stays intact for the GRU.
-* **Curriculum on goal distance.** The reward is sparse (`+1` only on reaching
-  the goal), so a fresh policy on a 20×20 board basically never stumbles onto
-  the goal at random within `max_episode_steps`. We start with goals at most
-  `--curriculum-start` (default `2`) cells away from the agent and linearly
-  ramp the cap up to the full diameter `h + w` over the first
-  `--curriculum-fraction` (default `0.5`) of training. This gives the policy
-  dense reward signal early, after which it generalises to longer distances.
+
 
 ### Why this design
 
@@ -222,14 +219,19 @@ class.
 ### Train PPO on a single board size
 
 One run trains one board size; use `--size 10 / 20 / 30` for the three
-requested scales. The defaults are tuned for 10×10 — the only thing you
-usually need to bump for larger mazes is `--total-steps`:
+requested scales. Below are the **recommended configs** that were validated
+experimentally:
 
 ```bash
-# 10x10: ~2 min on CPU, reaches succ > 0.9
-python -m agent.train --size 10
-python -m agent.train --size 20 --total-steps 3_000_000
-python -m agent.train --size 30 --total-steps 10_000_000 
+python -m agent.train --size 10 --total-steps 500_000
+python -m agent.train --size 20 \
+    --total-steps 8_000_000 --num-envs 128 \
+    --max-episode-steps 200 --entropy-coef 0.02 \
+    --action-embed-dim 0 --curriculum-start 40 
+python -m agent.train --size 30 \
+    --total-steps 20_000_000 --num-envs 128 \
+    --max-episode-steps 700 --entropy-coef 0.02 \
+    --action-embed-dim 0 --curriculum-start 60 s
 ```
 
 The obstacle mask and color map are sampled once at startup from `--seed`
@@ -250,14 +252,17 @@ Key flags (see `--help` for the rest):
 | `--rollout-length` | `128` | env steps per PPO rollout |
 | `--epochs` | `10` | PPO update epochs per rollout |
 | `--minibatches` | `4` | minibatches per epoch (each = `num_envs / minibatches` envs) |
-| `--max-episode-steps` | `4 * size` | episode length limit |
+| `--max-episode-steps` | `10 * size` | episode length limit |
 | `--lr` | `5e-4` | Adam learning rate |
-| `--gamma` / `--gae-lambda` | `0.95 / 0.95` | discount and GAE λ (γ matches our ≤ `4 * size`-step episodes) |
+| `--gamma` / `--gae-lambda` | `0.99 / 0.95` | discount and GAE λ |
 | `--entropy-coef` | `0.01` | entropy bonus weight |
 | `--clip-eps` | `0.2` | PPO clip range |
+| `--action-embed-dim` | `32` | prev-action embedding size; set to `0` to remove it (recommended for ≥ 20×20) |
+| `--hidden-dim` | `128` | GRU hidden state size |
+| `--num-layers` | `1` | stacked GRU layers |
 | `--curriculum-start` | `2` | initial max Manhattan distance from start to goal |
 | `--curriculum-end` | `h + w` | final max Manhattan distance (the full board diameter) |
-| `--curriculum-fraction` | `0.5` | fraction of `--total-steps` over which `max_goal_distance` ramps linearly from `--curriculum-start` to `--curriculum-end` |
+| `--curriculum-fraction` | `0.5` | fraction of `--total-steps` over which `max_goal_distance` ramps linearly |
 | `--mnist-checkpoint` | `checkpoints/mnist_classifier.pt` | frozen encoder weights |
 | `--device` | `cpu` | use `cuda` / `mps` if available |
 | `--seed` | `0` | seed for env layout, RNG, and policy init |
@@ -273,10 +278,32 @@ Per-rollout metrics print as:
 [   98304/300000]  d_max= 13  ep_ret=0.45  ep_len=31.6  succ=0.45  n_ep=126  pi_loss=-0.017  v_loss=0.024  H=1.155  kl=+0.008  sps=2706
 ```
 
-`ep_ret` is the mean episode return for episodes that finished within the
-rollout, `succ` is the share of them that actually reached the goal, `d_max`
-is the current value of `env.max_goal_distance` set by the curriculum, and
-`sps` is environment steps per wall-clock second.
+
+## Results
+
+| size | succ | steps | config |
+|------|------|-------|--------|
+| 10×10 | **1.00** | 500 k | defaults + curriculum |
+| 20×20 | **0.91–0.96** | 8 M | no curriculum, `action_embed_dim=0`, `num_envs=128` |
+| 30×30 | ~0.40 | 20 M | no curriculum, `max_episode_steps=700` |
+
+### 10×10
+
+![10×10 learning curves](checkpoints/policy_10x10_curves.png)
+
+![10×10 rollout](checkpoints/policy_10x10_rollout.gif)
+
+### 20×20
+
+![20×20 learning curves](checkpoints/policy_20x20_curves.png)
+
+![20×20 rollout](checkpoints/policy_20x20_rollout.gif)
+
+### 30×30
+
+![30×30 learning curves](checkpoints/policy_30x30_curves.png)
+
+![30×30 rollout](checkpoints/policy_30x30_rollout.gif)
 
 ### Evaluate a trained policy: learning curves + GIF
 

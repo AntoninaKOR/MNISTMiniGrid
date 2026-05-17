@@ -174,6 +174,7 @@ def main() -> None:
         goal_dim=height + width,
         n_actions=4,
         hidden_dim=int(train_args["hidden_dim"]),
+        action_embed_dim=int(train_args.get("action_embed_dim", 32)),
         num_layers=int(train_args.get("num_layers", 1)),
     ).to(device)
     policy.load_state_dict(ckpt["policy"])
