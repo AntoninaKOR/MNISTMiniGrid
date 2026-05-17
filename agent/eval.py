@@ -126,8 +126,8 @@ def record_gif(
             prev_action = torch.where(episode_start, null_action, prev_action)
             image_t = torch.from_numpy(obs["image"]).to(device)
             goal_t = torch.from_numpy(obs["goal"]).to(device)
-            digit = classifier.predict(image_t)
-            logits, _, hidden = policy.step(digit, goal_t, prev_action, hidden)
+            digit_probs = classifier.predict_probs(image_t)
+            logits, _, hidden = policy.step(digit_probs, goal_t, prev_action, hidden)
             if deterministic:
                 action = logits.argmax(-1)
             else:

@@ -42,7 +42,8 @@ class Rollout:
     actions: torch.Tensor         # (T, B) long
     log_probs: torch.Tensor       # (T, B) float
     values: torch.Tensor          # (T, B) float
-    rewards: torch.Tensor         # (T, B) float
+    rewards: torch.Tensor         # (T, B) float -- raw env reward
+    terminating_values: torch.Tensor  # (T, B) float
     dones: torch.Tensor           # (T, B) bool (term | trunc at step t)
     episode_starts: torch.Tensor  # (T, B) bool (first step after a reset)
     initial_hidden: torch.Tensor  # (num_layers, B, hidden)
@@ -86,6 +87,7 @@ def collect_rollout(
     log_probs_buf = torch.empty(T, B, dtype=torch.float32, device=device)
     values_buf = torch.empty(T, B, dtype=torch.float32, device=device)
     rewards_buf = torch.empty(T, B, dtype=torch.float32, device=device)
+    terminating_values_buf = torch.zeros(T, B, dtype=torch.float32, device=device)
     dones_buf = torch.empty(T, B, dtype=torch.bool, device=device)
     starts_buf = torch.empty(T, B, dtype=torch.bool, device=device)
 
@@ -130,10 +132,18 @@ def collect_rollout(
         rewards_buf[t] = torch.from_numpy(reward.astype(np.float32)).to(device)
         dones_buf[t] = torch.from_numpy(done).to(device)
 
-        # Episode statistics for envs that just finished. ``env.episode_return``
-        # and ``env.step_count`` are updated inside ``step()``, and only reset
-        # on the next call when NEXT_STEP autoreset kicks in -- so we read
-        # them here before stepping again.
+        if truncated.any():
+            trunc_mask = torch.from_numpy(truncated).to(device)
+            term_image_t = torch.from_numpy(new_obs["image"]).to(device)
+            term_goal_t = torch.from_numpy(new_obs["goal"]).to(device)
+            term_digit = classifier.predict(term_image_t)
+            # ``hidden`` and ``action`` are post-step-t -> the right context for
+            # evaluating V at s_{t+1} (i.e. the terminating obs).
+            _, term_value, _ = policy.step(term_digit, term_goal_t, action, hidden)
+            terminating_values_buf[t] = torch.where(
+                trunc_mask, term_value, torch.zeros_like(term_value)
+            )
+
         for i in np.flatnonzero(done):
             completed_returns.append(float(env.episode_return[i]))
             completed_lengths.append(int(env.step_count[i]))
@@ -160,6 +170,7 @@ def collect_rollout(
         log_probs=log_probs_buf,
         values=values_buf,
         rewards=rewards_buf,
+        terminating_values=terminating_values_buf,
         dones=dones_buf,
         episode_starts=starts_buf,
         initial_hidden=initial_hidden,
@@ -212,8 +223,9 @@ def ppo_update(
     Minibatches are formed by partitioning *envs* (not timesteps), so each
     minibatch keeps the full ``T``-step time axis intact for the GRU.
     """
+    augmented_rewards = rollout.rewards + config.gamma * rollout.terminating_values
     advantages, returns = compute_gae(
-        rollout.rewards,
+        augmented_rewards,
         rollout.values,
         rollout.dones,
         rollout.last_value,
